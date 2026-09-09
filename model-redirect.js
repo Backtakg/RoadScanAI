@@ -1,7 +1,8 @@
-// RoadScan AI — ONNX Runtime Web compatibility fix.
-// Do NOT redirect the pothole model to a different YOLO export: its tensor
-// layout may not match the decoder in app-fixed.js.
+// RoadScan AI — ONNX Runtime Web compatibility configuration.
+// Keep the production inference path untouched. The pothole model's tensor
+// layout is decoded by app-v2.js and must not be replaced or intercepted.
 (function () {
+  'use strict';
   if (!window.ort) return;
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.proxy = false;
@@ -9,10 +10,9 @@
   ort.env.logLevel = 'warning';
 })();
 
-// GPS route guard: browser location can legitimately improve its accuracy while
-// the phone is stationary, but those accuracy-only fixes must never become route
-// points. We also reject physically impossible jumps so a GPS glitch cannot draw
-// a blue line across the map. The browser still provides the best current fix.
+// GPS route guard. GPS accuracy can improve while the phone is stationary;
+// those accuracy-only fixes must not create route points. Also reject obvious
+// GPS jumps so a bad fix cannot draw a long false segment across the map.
 (function () {
   'use strict';
 
@@ -31,15 +31,14 @@
       if (!layer || typeof layer.getLatLngs !== 'function' || typeof layer.setLatLngs !== 'function') return;
       var raw = layer.getLatLngs();
       if (!Array.isArray(raw) || raw.length < 2 || !raw[0] || !raw[1] || Array.isArray(raw[0])) return;
-
-      var bad = false;
       for (var i = 1; i < raw.length; i++) {
         var a = { lat: raw[i - 1].lat, lon: raw[i - 1].lng };
         var b = { lat: raw[i].lat, lon: raw[i].lng };
-        if (distance(a, b) > 250) { bad = true; break; }
+        if (distance(a, b) > 250) {
+          map.removeLayer(layer);
+          return;
+        }
       }
-
-      if (bad) map.removeLayer(layer);
     });
   }
 
@@ -63,7 +62,6 @@
       window.lastPointAt = 0;
       var statusEl = document.getElementById('gpsStatus');
       if (statusEl) statusEl.textContent = 'Finding best GPS fix…';
-
       var lastAccepted = null;
       var opts = { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 };
 
@@ -104,7 +102,6 @@
 
         var loc = document.getElementById('lastLocation');
         if (loc) loc.textContent = candidate.lat.toFixed(6) + ', ' + candidate.lon.toFixed(6) + ' · ±' + Math.round(accuracy) + ' m';
-
         if (window.mapLine) window.mapLine.setLatLngs(window.points);
         if (window.roadMap) {
           if (window.points.length === 1) {
@@ -129,10 +126,8 @@
   });
 })();
 
-// Mobile map scroll-performance fix.
-// Leaflet can treat one-finger touches as map gestures, competing with vertical
-// page scrolling. Disable touch map panning/zooming on touch devices so the page
-// scrolls smoothly; desktop mouse controls and zoom buttons remain available.
+// Mobile map scroll-performance fix. Keep one-finger page scrolling natural;
+// desktop mouse controls and the Leaflet zoom buttons remain available.
 (function () {
   'use strict';
   function tuneMapForScroll() {
@@ -151,73 +146,4 @@
     setTimeout(tuneMapForScroll, 100);
     setTimeout(tuneMapForScroll, 700);
   });
-})();
-
-// AI camera robustness layer.
-// Phone footage is often shaky, low-contrast and very dark. The detector itself
-// is unchanged; instead, adapt the tensor only when the incoming frame is dark
-// enough to benefit. This avoids permanently boosting normal daylight frames.
-// Gamma lift + contrast normalization improves visibility of road texture and
-// pothole boundaries at dusk/night while keeping the original tensor layout.
-(function () {
-  'use strict';
-  if (!window.ort || !ort.InferenceSession || !ort.Tensor) return;
-
-  var proto = ort.InferenceSession.prototype;
-  var originalRun = proto.run;
-  if (!originalRun || originalRun.__roadscanRobust) return;
-
-  function enhanceTensor(t) {
-    if (!t || !t.data || !t.dims || t.type !== 'float32') return t;
-    var data = t.data;
-    var channels = 3;
-    var n = Math.floor(data.length / channels);
-    if (!n || data.length !== n * channels) return t;
-
-    // Estimate luminance from the RGB planes. The YOLO input is RGB planar.
-    var mean = 0;
-    for (var i = 0; i < n; i += 32) {
-      mean += 0.2126 * data[i] + 0.7152 * data[n + i] + 0.0722 * data[2 * n + i];
-    }
-    mean /= Math.ceil(n / 32);
-
-    // Do nothing on normal daylight footage.
-    if (mean >= 0.40) return t;
-
-    var gamma = mean < 0.20 ? 0.62 : mean < 0.30 ? 0.70 : 0.80;
-    var contrast = mean < 0.22 ? 1.18 : 1.12;
-    var out = new Float32Array(data.length);
-
-    for (var c = 0; c < channels; c++) {
-      var base = c * n;
-      for (var p = 0; p < n; p++) {
-        var x = Math.max(0, Math.min(1, data[base + p]));
-        // Gamma lift shadow detail, then gently expand local tonal range around mid-gray.
-        x = Math.pow(x, gamma);
-        x = 0.5 + (x - 0.5) * contrast;
-        out[base + p] = Math.max(0, Math.min(1, x));
-      }
-    }
-    return new ort.Tensor('float32', out, t.dims);
-  }
-
-  proto.run = function (feeds, options) {
-    try {
-      if (feeds && typeof feeds === 'object') {
-        var keys = Object.keys(feeds);
-        if (keys.length === 1) {
-          var key = keys[0], tensor = feeds[key], enhanced = enhanceTensor(tensor);
-          if (enhanced !== tensor) {
-            var adapted = Object.assign({}, feeds);
-            adapted[key] = enhanced;
-            return originalRun.call(this, adapted, options);
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('RoadScan AI preprocessing fallback:', e);
-    }
-    return originalRun.call(this, feeds, options);
-  };
-  proto.run.__roadscanRobust = true;
 })();
