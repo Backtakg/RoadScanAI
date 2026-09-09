@@ -39,19 +39,13 @@
         if (distance(a, b) > 250) { bad = true; break; }
       }
 
-      if (bad) {
-        // Detach the contaminated polyline. The owning tracker may continue
-        // collecting data, but the bad historical jump can no longer be shown.
-        map.removeLayer(layer);
-      }
+      if (bad) map.removeLayer(layer);
     });
   }
 
   function install() {
     if (!window.navigator || !navigator.geolocation) return;
 
-    // Replace the app's route collector with a movement-only collector.
-    // Accuracy improvements alone never create a new route point.
     window.gpsStart = function () {
       if (!navigator.geolocation) {
         var el = document.getElementById('gpsStatus');
@@ -84,9 +78,6 @@
         var candidate = { lat: c.latitude, lon: c.longitude, accuracy: accuracy };
         var moved = lastAccepted ? distance(lastAccepted, candidate) : Infinity;
 
-        // First fix establishes the route origin. After that, only genuine
-        // movement is allowed to extend the blue route. Better accuracy alone
-        // is never treated as movement.
         if (!lastAccepted) {
           lastAccepted = candidate;
           window.gps = candidate;
@@ -95,7 +86,7 @@
           window.lastPointAt = Date.now();
         } else {
           var elapsed = Math.max(1, (Date.now() - window.lastPointAt) / 1000);
-          var maxTravel = Math.max(120, elapsed * 45); // ~162 km/h upper bound
+          var maxTravel = Math.max(120, elapsed * 45);
           if (moved < 5) {
             window.gps = candidate;
             if (statusEl) statusEl.textContent = 'Stationary · GPS ±' + Math.round(accuracy) + ' m';
@@ -117,9 +108,9 @@
         if (window.mapLine) window.mapLine.setLatLngs(window.points);
         if (window.roadMap) {
           if (window.points.length === 1) {
-            window.roadMap.setView(window.points[0], 18, { animate: true });
+            window.roadMap.setView(window.points[0], 18, { animate: false });
           } else if (window.points.length > 1) {
-            window.roadMap.fitBounds(L.latLngBounds(window.points), { padding: [30, 30], maxZoom: 19 });
+            window.roadMap.fitBounds(L.latLngBounds(window.points), { padding: [30, 30], maxZoom: 19, animate: false });
           }
         }
         cleanRoutes();
@@ -132,10 +123,32 @@
     };
   }
 
-  // app-v2.js is loaded immediately after this file, so install after it has
-  // executed and replaced the original gpsStart declaration.
   window.addEventListener('load', function () {
     setTimeout(install, 50);
     setInterval(cleanRoutes, 1000);
+  });
+})();
+
+// Mobile map scroll-performance fix.
+// Leaflet can treat one-finger touches as map gestures, competing with vertical
+// page scrolling. Disable touch map panning/zooming on touch devices so the page
+// scrolls smoothly; desktop mouse controls and zoom buttons remain available.
+(function () {
+  'use strict';
+  function tuneMapForScroll() {
+    var map = window.roadMap;
+    if (!map) return false;
+    var touch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (touch) {
+      if (map.dragging) map.dragging.disable();
+      if (map.touchZoom) map.touchZoom.disable();
+      var el = document.getElementById('map');
+      if (el) el.style.touchAction = 'pan-y';
+    }
+    return true;
+  }
+  window.addEventListener('load', function () {
+    setTimeout(tuneMapForScroll, 100);
+    setTimeout(tuneMapForScroll, 700);
   });
 })();
