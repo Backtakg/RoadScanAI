@@ -1,11 +1,10 @@
-// RoadScanAI model source fix: use a GitHub-hosted ONNX file with CORS support.
-// The previous Hugging Face/Xet downloads could fail in mobile browsers.
-(function(){
-  const nativeFetch = window.fetch.bind(window);
-  const stableModel = 'https://raw.githubusercontent.com/Prince-IISc-CalUniv/Edge-AI-Traffic-Analytics-and-violation-Detection/main/pipelines/pipeline3_pothole_detection/best.onnx';
-  window.fetch = function(input, init){
-    const url = typeof input === 'string' ? input : (input && input.url) || '';
-    if(url.includes('huggingface.co/') && url.includes('best.onnx')) return nativeFetch(stableModel, init);
-    return nativeFetch(input, init);
-  };
+// RoadScan AI — ONNX Runtime Web compatibility fix.
+// Do NOT redirect the pothole model to a different YOLO export: its tensor
+// layout may not match the decoder in app-fixed.js.
+(function () {
+  if (!window.ort) return;
+  ort.env.wasm.numThreads = 1;
+  ort.env.wasm.proxy = false;
+  ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
+  ort.env.logLevel = 'warning';
 })();
