@@ -152,3 +152,72 @@
     setTimeout(tuneMapForScroll, 700);
   });
 })();
+
+// AI camera robustness layer.
+// Phone footage is often shaky, low-contrast and very dark. The detector itself
+// is unchanged; instead, adapt the tensor only when the incoming frame is dark
+// enough to benefit. This avoids permanently boosting normal daylight frames.
+// Gamma lift + contrast normalization improves visibility of road texture and
+// pothole boundaries at dusk/night while keeping the original tensor layout.
+(function () {
+  'use strict';
+  if (!window.ort || !ort.InferenceSession || !ort.Tensor) return;
+
+  var proto = ort.InferenceSession.prototype;
+  var originalRun = proto.run;
+  if (!originalRun || originalRun.__roadscanRobust) return;
+
+  function enhanceTensor(t) {
+    if (!t || !t.data || !t.dims || t.type !== 'float32') return t;
+    var data = t.data;
+    var channels = 3;
+    var n = Math.floor(data.length / channels);
+    if (!n || data.length !== n * channels) return t;
+
+    // Estimate luminance from the RGB planes. The YOLO input is RGB planar.
+    var mean = 0;
+    for (var i = 0; i < n; i += 32) {
+      mean += 0.2126 * data[i] + 0.7152 * data[n + i] + 0.0722 * data[2 * n + i];
+    }
+    mean /= Math.ceil(n / 32);
+
+    // Do nothing on normal daylight footage.
+    if (mean >= 0.40) return t;
+
+    var gamma = mean < 0.20 ? 0.62 : mean < 0.30 ? 0.70 : 0.80;
+    var contrast = mean < 0.22 ? 1.18 : 1.12;
+    var out = new Float32Array(data.length);
+
+    for (var c = 0; c < channels; c++) {
+      var base = c * n;
+      for (var p = 0; p < n; p++) {
+        var x = Math.max(0, Math.min(1, data[base + p]));
+        // Gamma lift shadow detail, then gently expand local tonal range around mid-gray.
+        x = Math.pow(x, gamma);
+        x = 0.5 + (x - 0.5) * contrast;
+        out[base + p] = Math.max(0, Math.min(1, x));
+      }
+    }
+    return new ort.Tensor('float32', out, t.dims);
+  }
+
+  proto.run = function (feeds, options) {
+    try {
+      if (feeds && typeof feeds === 'object') {
+        var keys = Object.keys(feeds);
+        if (keys.length === 1) {
+          var key = keys[0], tensor = feeds[key], enhanced = enhanceTensor(tensor);
+          if (enhanced !== tensor) {
+            var adapted = Object.assign({}, feeds);
+            adapted[key] = enhanced;
+            return originalRun.call(this, adapted, options);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('RoadScan AI preprocessing fallback:', e);
+    }
+    return originalRun.call(this, feeds, options);
+  };
+  proto.run.__roadscanRobust = true;
+})();
