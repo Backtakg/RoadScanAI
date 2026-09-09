@@ -1,7 +1,10 @@
-const MODEL_URL='https://huggingface.co/peterhdd/pothole-detection-yolov8/resolve/main/best.onnx?download=true';
+const MODEL_URLS=[
+  'https://huggingface.co/subhodeepmoitra/pothole-detection-yolov8/resolve/main/best.onnx?download=true',
+  'https://huggingface.co/peterhdd/pothole-detection-yolov8/resolve/main/best.onnx?download=true'
+];
 const ORT_WASM='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
-const INPUT=640, CONF=.30, IOU=.45, DETECT_EVERY=500;
-let session=null,running=false,stream=null,gpsWatch=null,timer=null,startedAt=null,finishedAt=null,lastInfer=0;
+const INPUT=640, CONF=.30, IOU=.45, DETECT_EVERY=600;
+let session=null,running=false,stream=null,gpsWatch=null,timer=null,startedAt=null,finishedAt=null,lastInfer=0,modelSource='';
 let tracks=[],nextId=1,events=[],route=[],lastGps=null,routeLine=null,startMarker=null,finishMarker=null;
 const $=id=>document.getElementById(id);
 const video=$('video'),overlay=$('overlay'),octx=overlay.getContext('2d');
@@ -11,42 +14,47 @@ function fmtDur(ms){let s=Math.floor(ms/1000),m=Math.floor(s/60);s%=60;return St
 function initMap(){try{if(typeof L==='undefined')return;const map=L.map('map').setView([27.7172,85.324],13);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors'}).addTo(map);routeLine=L.polyline([],{weight:5}).addTo(map);window.roadMap=map}catch(e){console.warn('Map unavailable',e)}}
 async function loadModel(){
   if(session)return true;
-  try{
-    if(typeof ort==='undefined')throw new Error('ONNX Runtime Web did not load from the CDN. Check your internet connection or browser extensions.');
-    ort.env.wasm.wasmPaths=ORT_WASM;
-    ort.env.wasm.numThreads=1;
-    ort.env.wasm.proxy=false;
-    ort.env.logLevel='warning';
-    setStatus('Downloading AI model (45 MB)…');
-    $('aiStatusDot').style.background='#ffc857';
-    const controller=new AbortController();
-    const timeout=setTimeout(()=>controller.abort(),90000);
-    let response;
-    try{response=await fetch(MODEL_URL,{mode:'cors',cache:'force-cache',signal:controller.signal});}
-    finally{clearTimeout(timeout)}
-    if(!response.ok)throw new Error(`Model download failed: HTTP ${response.status}`);
-    const contentLength=Number(response.headers.get('content-length')||0);
-    if(contentLength&&contentLength<1000000)throw new Error('Downloaded model is unexpectedly small; the model URL returned the wrong file.');
-    const bytes=await response.arrayBuffer();
-    if(bytes.byteLength<1000000)throw new Error(`Model download was only ${(bytes.byteLength/1024/1024).toFixed(1)} MB.`);
-    setStatus('Starting AI engine…');
-    session=await ort.InferenceSession.create(bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
-    if(!session.inputNames?.length||!session.outputNames?.length)throw new Error('ONNX model loaded but has no input/output tensors.');
-    console.log('RoadScan model loaded',session.inputNames,session.outputNames);
-    setStatus('AI ready');$('aiStatusDot').style.background='var(--accent)';return true;
-  }catch(e){
-    session=null;console.error('RoadScan AI model load failed:',e);
-    const msg=e?.name==='AbortError'?'Model download timed out after 90 seconds.':(e?.message||String(e));
-    setStatus('AI model failed — camera still available');$('aiStatusDot').style.background='#ff6262';
-    $('reportSummary').textContent='AI could not load. Camera/video is still available. Error: '+msg;
-    return false;
+  if(typeof ort==='undefined'){setStatus('AI library failed to load');return false}
+  ort.env.wasm.wasmPaths=ORT_WASM;
+  ort.env.wasm.numThreads=1;
+  ort.env.wasm.proxy=false;
+  ort.env.logLevel='warning';
+  let lastError=null;
+  for(let i=0;i<MODEL_URLS.length;i++){
+    const url=MODEL_URLS[i];
+    try{
+      setStatus(i===0?'Loading lightweight AI model (13 MB)…':'Trying backup AI model (45 MB)…');
+      $('aiStatusDot').style.background='#ffc857';
+      const controller=new AbortController();
+      const timeout=setTimeout(()=>controller.abort(),60000);
+      let response;
+      try{response=await fetch(url,{mode:'cors',cache:'force-cache',signal:controller.signal})}finally{clearTimeout(timeout)}
+      if(!response.ok)throw new Error(`HTTP ${response.status}`);
+      const bytes=await response.arrayBuffer();
+      if(bytes.byteLength<5000000)throw new Error(`Model file is only ${(bytes.byteLength/1024/1024).toFixed(1)} MB`);
+      setStatus('Starting browser AI engine…');
+      session=await ort.InferenceSession.create(bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
+      if(!session.inputNames.length||!session.outputNames.length)throw new Error('Model has no usable tensors');
+      modelSource=url;
+      console.log('RoadScan model loaded:',url,session.inputNames,session.outputNames);
+      setStatus('AI ready');$('aiStatusDot').style.background='var(--accent)';
+      return true;
+    }catch(e){
+      lastError=e;
+      session=null;
+      console.error('RoadScan model attempt failed:',url,e);
+    }
   }
+  const msg=lastError?.name==='AbortError'?'Model download timed out.':(lastError?.message||String(lastError));
+  setStatus('AI model failed — camera still available');$('aiStatusDot').style.background='#ff6262';
+  $('reportSummary').textContent='AI model could not start: '+msg;
+  return false;
 }
 function letterbox(){const c=document.createElement('canvas');c.width=INPUT;c.height=INPUT;const x=c.getContext('2d'),scale=Math.min(INPUT/video.videoWidth,INPUT/video.videoHeight),w=Math.round(video.videoWidth*scale),h=Math.round(video.videoHeight*scale),dx=(INPUT-w)/2,dy=(INPUT-h)/2;x.fillStyle='#000';x.fillRect(0,0,INPUT,INPUT);x.drawImage(video,dx,dy,w,h);return{canvas:c,scale,dx,dy}}
 function tensor(c){const d=c.getContext('2d').getImageData(0,0,INPUT,INPUT).data,a=new Float32Array(3*INPUT*INPUT),n=INPUT*INPUT;for(let i=0,p=0;i<d.length;i+=4,p++){a[p]=d[i]/255;a[n+p]=d[i+1]/255;a[2*n+p]=d[i+2]/255}return new ort.Tensor('float32',a,[1,3,INPUT,INPUT])}
 function iou(a,b){const x=Math.max(a[0],b[0]),y=Math.max(a[1],b[1]),r=Math.min(a[2],b[2]),z=Math.min(a[3],b[3]),inter=Math.max(0,r-x)*Math.max(0,z-y),aa=(a[2]-a[0])*(a[3]-a[1]),ab=(b[2]-b[0])*(b[3]-b[1]);return inter/(aa+ab-inter+1e-9)}
 function nms(ds){ds.sort((a,b)=>b.conf-a.conf);const out=[];while(ds.length){const x=ds.shift();out.push(x);for(let i=ds.length-1;i>=0;i--)if(iou(x.box,ds[i].box)>IOU)ds.splice(i,1)}return out}
-function decode(out,lb,w,h){const d=out.data,di=out.dims,c=di[di.length-2],n=di[di.length-1],trans=c<n,attrs=trans?c:n,count=trans?n:c,get=(a,i)=>trans?d[a*count+i]:d[i*attrs+a],ds=[];for(let i=0;i<count;i++){const conf=get(4,i);if(conf<CONF)continue;const cx=get(0,i),cy=get(1,i),bw=get(2,i),bh=get(3,i);let x1=(cx-bw/2-lb.dx)/lb.scale,y1=(cy-bh/2-lb.dy)/lb.scale,x2=(cx+bw/2-lb.dx)/lb.scale,y2=(cy+bh/2-lb.dy)/lb.scale;x1=Math.max(0,Math.min(w,x1));y1=Math.max(0,Math.min(h,y1));x2=Math.max(0,Math.min(w,x2));y2=Math.max(0,Math.min(h,y2));if(x2>x1&&y2>y1)ds.push({box:[x1,y1,x2,y2],conf})}return nms(ds)}
+function decode(out,lb,w,h){const d=out.data,di=out.dims;if(!di||di.length<2)throw new Error('Unexpected model output shape');const c=di[di.length-2],n=di[di.length-1],trans=c<n,attrs=trans?c:n,count=trans?n:c;if(attrs<5)throw new Error('Model output is not YOLO detection format');const get=(a,i)=>trans?d[a*count+i]:d[i*attrs+a],ds=[];for(let i=0;i<count;i++){const conf=get(4,i);if(conf<CONF)continue;const cx=get(0,i),cy=get(1,i),bw=get(2,i),bh=get(3,i);let x1=(cx-bw/2-lb.dx)/lb.scale,y1=(cy-bh/2-lb.dy)/lb.scale,x2=(cx+bw/2-lb.dx)/lb.scale,y2=(cy+bh/2-lb.dy)/lb.scale;x1=Math.max(0,Math.min(w,x1));y1=Math.max(0,Math.min(h,y1));x2=Math.max(0,Math.min(w,x2));y2=Math.max(0,Math.min(h,y2));if(x2>x1&&y2>y1)ds.push({box:[x1,y1,x2,y2],conf})}return nms(ds)}
 function severity(b,w,h){const a=(b[2]-b[0])*(b[3]-b[1])/(w*h);return a>.065?'High':a>.025?'Medium':'Low'}
 function evidence(b,w,h){const c=document.createElement('canvas'),pad=30,x=Math.max(0,b[0]-pad),y=Math.max(0,b[1]-pad),r=Math.min(w,b[2]+pad),z=Math.min(h,b[3]+pad);c.width=r-x;c.height=z-y;c.getContext('2d').drawImage(video,x,y,c.width,c.height,0,0,c.width,c.height);return c.toDataURL('image/jpeg',.82)}
 function updateTracks(ds,w,h){const used=new Set(),next=[];for(const d of ds){let bi=-1,bs=.3;tracks.forEach((t,i)=>{if(!used.has(i)){const v=iou(t.box,d.box);if(v>bs){bs=v;bi=i}}});if(bi>=0){const t=tracks[bi];used.add(bi);t.box=d.box;t.conf=d.conf;t.missed=0;next.push(t)}else{const t={id:nextId++,box:d.box,conf:d.conf,missed:0};next.push(t);events.push({id:t.id,confidence:d.conf,severity:severity(d.box,w,h),time:new Date().toISOString(),gps:lastGps?{...lastGps}:null,image:evidence(d.box,w,h)})}}tracks.forEach((t,i)=>{if(!used.has(i)){t.missed++;if(t.missed<5)next.push(t)}});tracks=next;renderMetrics()}
